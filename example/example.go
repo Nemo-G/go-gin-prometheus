@@ -1,14 +1,12 @@
 package main
 
 import (
-	"github.com/mcuadros/go-gin-prometheus"
+	"github.com/Nemo-G/go-gin-prometheus/middleware"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	r := gin.New()
-
 	/*	// Optional custom metrics list
 		customMetrics := []*ginprometheus.Metric{
 			&ginprometheus.Metric{
@@ -27,15 +25,17 @@ func main() {
 			//	counter, counter_vec, gauge, gauge_vec,
 			//	histogram, histogram_vec, summary, summary_vec
 		}
-		p := ginprometheus.NewPrometheus("gin", customMetrics)
+		p := middleware.NewPrometheus("gin", customMetrics)
 	*/
 
-	p := ginprometheus.NewPrometheus("gin")
+	router := gin.New()
 
-	p.Use(r)
-	r.GET("/", func(c *gin.Context) {
-		c.JSON(200, "Hello world!")
-	})
+	// prometheus middleware
+	ginPrometheus := middleware.NewPrometheus("namespace_prefix")
+	ginPrometheus.SetListenAddress(":4000")
+	ginPrometheus.Use(router)
 
-	r.Run(":29090")
+	// basic router
+	// router.Use(basicMiddleWares()...)
+
 }
