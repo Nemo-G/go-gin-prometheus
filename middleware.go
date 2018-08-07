@@ -1,20 +1,21 @@
-package ginprometheus
+package middleware
 
 import (
 	"bytes"
+	"fmt"
+	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
-
-	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	log "github.com/sirupsen/logrus"
 )
 
 var defaultMetricPath = "/metrics"
+var defaultNameSpace = "gin"
 
 // Standard default metrics
 //	counter, counter_vec, gauge, gauge_vec,
@@ -24,7 +25,7 @@ var reqCnt = &Metric{
 	Name:        "requests_total",
 	Description: "How many HTTP requests processed, partitioned by status code and HTTP method.",
 	Type:        "counter_vec",
-	Args:        []string{"code", "method", "handler", "host", "url"}}
+	Args:        []string{"code", "method", "url"}}
 
 var reqDur = &Metric{
 	ID:          "reqDur",
@@ -180,6 +181,7 @@ func (p *Prometheus) setMetricsPath(e *gin.Engine) {
 	if p.listenAddress != "" {
 		p.router.GET(p.MetricsPath, prometheusHandler())
 		p.runServer()
+		fmt.Fprintf(os.Stdout, "[Prometheus] Server start at: %v\n", p.listenAddress)
 	} else {
 		e.GET(p.MetricsPath, prometheusHandler())
 	}
@@ -224,7 +226,7 @@ func (p *Prometheus) sendMetricsToPushGateway(metrics []byte) {
 	client := &http.Client{}
 	_, err = client.Do(req)
 	if err != nil {
-		log.Error("Error sending to push gatway: " + err.Error())
+		fmt.Fprintln(os.Stderr, "[Prometheus] Error sending to push gatway: "+err.Error())
 	}
 }
 
@@ -244,6 +246,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "counter_vec":
 		metric = prometheus.NewCounterVec(
 			prometheus.CounterOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -253,6 +256,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "counter":
 		metric = prometheus.NewCounter(
 			prometheus.CounterOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -261,6 +265,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "gauge_vec":
 		metric = prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -270,6 +275,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "gauge":
 		metric = prometheus.NewGauge(
 			prometheus.GaugeOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -278,6 +284,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "histogram_vec":
 		metric = prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -287,6 +294,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "histogram":
 		metric = prometheus.NewHistogram(
 			prometheus.HistogramOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -295,6 +303,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "summary_vec":
 		metric = prometheus.NewSummaryVec(
 			prometheus.SummaryOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -304,6 +313,7 @@ func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	case "summary":
 		metric = prometheus.NewSummary(
 			prometheus.SummaryOpts{
+				Namespace: defaultNameSpace,
 				Subsystem: subsystem,
 				Name:      m.Name,
 				Help:      m.Description,
@@ -318,9 +328,9 @@ func (p *Prometheus) registerMetrics(subsystem string) {
 	for _, metricDef := range p.MetricsList {
 		metric := NewMetric(metricDef, subsystem)
 		if err := prometheus.Register(metric); err != nil {
-			log.Infof("%s could not be registered: ", metricDef.Name, err)
+			fmt.Fprintf(os.Stderr, "%v could not be registered: %v\n", metricDef.Name, err)
 		} else {
-			log.Infof("%s registered.", metricDef.Name)
+			fmt.Fprintf(os.Stdout, "%v registered.\n", metricDef.Name)
 		}
 		switch metricDef {
 		case reqCnt:
@@ -359,14 +369,14 @@ func (p *Prometheus) handlerFunc() gin.HandlerFunc {
 		reqSz := computeApproximateRequestSize(c.Request)
 
 		c.Next()
-
 		status := strconv.Itoa(c.Writer.Status())
 		elapsed := float64(time.Since(start)) / float64(time.Second)
 		resSz := float64(c.Writer.Size())
 
 		p.reqDur.Observe(elapsed)
+		// currently use url as label but it is not suggested by prometheus
 		url := p.ReqCntURLLabelMappingFn(c)
-		p.reqCnt.WithLabelValues(status, c.Request.Method, c.HandlerName(), c.Request.Host, url).Inc()
+		p.reqCnt.WithLabelValues(status, c.Request.Method, url).Inc()
 		p.reqSz.Observe(float64(reqSz))
 		p.resSz.Observe(resSz)
 	}
@@ -379,7 +389,95 @@ func prometheusHandler() gin.HandlerFunc {
 	}
 }
 
-// From https://github.com/DanielHeckrath/gin-prometheus/blob/master/gin_prometheus.go
+// Override InstrumentHandler to support Gin
+// Related func can be found in prometheus/http.go
+
+// override InstrumentHandlerFunc
+func InstrumentHandlerFunc(handlerName string, handlerFunc gin.HandlerFunc) gin.HandlerFunc {
+	return InstrumentHandlerFuncWithOpts(
+		prometheus.SummaryOpts{
+			Namespace:   defaultNameSpace,
+			Subsystem:   "http",
+			ConstLabels: prometheus.Labels{"handler": handlerName},
+		},
+		handlerFunc,
+	)
+}
+
+// override InstrumentHandlerFuncWithOpts
+func InstrumentHandlerFuncWithOpts(opts prometheus.SummaryOpts, handlerFunc gin.HandlerFunc) gin.HandlerFunc {
+	reqCnt := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace:   opts.Namespace,
+			Subsystem:   opts.Subsystem,
+			Name:        "requests_total",
+			Help:        "Total number of HTTP requests made.",
+			ConstLabels: opts.ConstLabels,
+		},
+		[]string{"Method", "Code"},
+	)
+
+	if err := prometheus.Register(reqCnt); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			reqCnt = are.ExistingCollector.(*prometheus.CounterVec)
+		} else {
+			panic(err)
+		}
+	}
+
+	opts.Name = "request_duration_microseconds"
+	opts.Help = "The HTTP request latencies in microseconds."
+	reqDur := prometheus.NewSummary(opts)
+	if err := prometheus.Register(reqDur); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			reqDur = are.ExistingCollector.(prometheus.Summary)
+		} else {
+			panic(err)
+		}
+	}
+
+	opts.Name = "request_size_bytes"
+	opts.Help = "The HTTP request sizes in bytes."
+	reqSz := prometheus.NewSummary(opts)
+	if err := prometheus.Register(reqSz); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			reqSz = are.ExistingCollector.(prometheus.Summary)
+		} else {
+			panic(err)
+		}
+	}
+
+	opts.Name = "response_size_bytes"
+	opts.Help = "The HTTP response sizes in bytes."
+	resSz := prometheus.NewSummary(opts)
+	if err := prometheus.Register(resSz); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			resSz = are.ExistingCollector.(prometheus.Summary)
+		} else {
+			panic(err)
+		}
+	}
+
+	return func(c *gin.Context) {
+		now := time.Now()
+
+		r := c.Request
+
+		reqSize := computeApproximateRequestSize(r)
+
+		handlerFunc(c)
+
+		elapsed := float64(time.Since(now)) / float64(time.Microsecond)
+
+		method := sanitizeMethod(r.Method)
+		code := sanitizeCode(c.Writer.Status())
+		reqCnt.WithLabelValues(method, code).Inc()
+		reqDur.Observe(elapsed)
+		resSz.Observe(float64(c.Writer.Size()))
+		reqSz.Observe(float64(reqSize))
+	}
+}
+
 func computeApproximateRequestSize(r *http.Request) int {
 	s := 0
 	if r.URL != nil {
@@ -402,4 +500,129 @@ func computeApproximateRequestSize(r *http.Request) int {
 		s += int(r.ContentLength)
 	}
 	return s
+}
+
+// helper func copied from prometheus/http.go
+func sanitizeMethod(m string) string {
+	switch m {
+	case "GET", "get":
+		return "get"
+	case "PUT", "put":
+		return "put"
+	case "HEAD", "head":
+		return "head"
+	case "POST", "post":
+		return "post"
+	case "DELETE", "delete":
+		return "delete"
+	case "CONNECT", "connect":
+		return "connect"
+	case "OPTIONS", "options":
+		return "options"
+	case "NOTIFY", "notify":
+		return "notify"
+	default:
+		return strings.ToLower(m)
+	}
+}
+
+func sanitizeCode(s int) string {
+	switch s {
+	case 100:
+		return "100"
+	case 101:
+		return "101"
+
+	case 200:
+		return "200"
+	case 201:
+		return "201"
+	case 202:
+		return "202"
+	case 203:
+		return "203"
+	case 204:
+		return "204"
+	case 205:
+		return "205"
+	case 206:
+		return "206"
+
+	case 300:
+		return "300"
+	case 301:
+		return "301"
+	case 302:
+		return "302"
+	case 304:
+		return "304"
+	case 305:
+		return "305"
+	case 307:
+		return "307"
+
+	case 400:
+		return "400"
+	case 401:
+		return "401"
+	case 402:
+		return "402"
+	case 403:
+		return "403"
+	case 404:
+		return "404"
+	case 405:
+		return "405"
+	case 406:
+		return "406"
+	case 407:
+		return "407"
+	case 408:
+		return "408"
+	case 409:
+		return "409"
+	case 410:
+		return "410"
+	case 411:
+		return "411"
+	case 412:
+		return "412"
+	case 413:
+		return "413"
+	case 414:
+		return "414"
+	case 415:
+		return "415"
+	case 416:
+		return "416"
+	case 417:
+		return "417"
+	case 418:
+		return "418"
+
+	case 500:
+		return "500"
+	case 501:
+		return "501"
+	case 502:
+		return "502"
+	case 503:
+		return "503"
+	case 504:
+		return "504"
+	case 505:
+		return "505"
+
+	case 428:
+		return "428"
+	case 429:
+		return "429"
+	case 431:
+		return "431"
+	case 511:
+		return "511"
+
+	default:
+		return strconv.Itoa(s)
+	}
 }
